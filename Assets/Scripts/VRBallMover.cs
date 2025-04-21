@@ -1,14 +1,16 @@
 using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit;
+using UnityEngine.XR.Interaction.Toolkit.Inputs;
 
 public class VRBallMover : MonoBehaviour
 {
-    public float pushForce = 10f; // Сила толчка
-    public float dampingFactor = 0.98f; // Коэффициент затухания скорости
+    public float pushForce = 10f; // Сила толчка шара
+    public float playerMoveForceMultiplier = 5f; // Множитель силы для движения игрока
+    public float dampingFactor = 0.98f; // Коэффициент затухания скорости шара
 
     private Rigidbody rb;
-    private XRController leftController;
-    private XRController rightController;
+    private XRGrabInteractable grabInteractable;
+    private Rigidbody playerRb; // Rigidbody игрока
 
     void Start()
     {
@@ -20,107 +22,88 @@ public class VRBallMover : MonoBehaviour
             return;
         }
 
-        // Поиск контроллеров по тегу (убедитесь, что у ваших контроллеров есть тег "LeftController" и "RightController")
-        GameObject leftControllerGO = GameObject.FindGameObjectWithTag("LeftController");
-        GameObject rightControllerGO = GameObject.FindGameObjectWithTag("RightController");
-
-        if (leftControllerGO != null)
+        grabInteractable = GetComponent<XRGrabInteractable>();
+        if (grabInteractable == null)
         {
-            leftController = leftControllerGO.GetComponent<XRController>();
-            if (leftController == null)
+            Debug.LogError("XRGrabInteractable component not found on this GameObject.");
+            enabled = false;
+            return;
+        }
+
+        // Поиск Rigidbody игрока по тегу (убедитесь, что у вашего XR Rig есть тег "Player")
+        GameObject playerGO = GameObject.FindGameObjectWithTag("Player");
+        if (playerGO != null)
+        {
+            playerRb = playerGO.GetComponent<Rigidbody>();
+            if (playerRb == null && !playerGO.GetComponent<CharacterController>())
             {
-                Debug.LogWarning("LeftController component not found on the LeftController GameObject.");
+                Debug.LogWarning("Rigidbody or CharacterController component not found on the Player GameObject.");
             }
         }
         else
         {
-            Debug.LogWarning("GameObject with tag 'LeftController' not found.");
+            Debug.LogWarning("GameObject with tag 'Player' not found.");
         }
 
-        if (rightControllerGO != null)
-        {
-            rightController = rightControllerGO.GetComponent<XRController>();
-            if (rightController == null)
-            {
-                Debug.LogWarning("RightController component not found on the RightController GameObject.");
-            }
-        }
-        else
-        {
-            Debug.LogWarning("GameObject with tag 'RightController' not found.");
-        }
+        // Подписываемся на события выбора (начала взаимодействия)
+        grabInteractable.selectEntered.AddListener(OnSelectEntered);
+        // Подписываемся на события отмены выбора (окончания взаимодействия)
+        grabInteractable.selectExited.AddListener(OnSelectExited);
     }
 
     void FixedUpdate()
     {
-        if (leftController != null)
-        {
-            CheckForPush(leftController);
-        }
-        if (rightController != null)
-        {
-            CheckForPush(rightController);
-        }
-
         // Применяем затухание для естественного замедления шара
         rb.velocity *= dampingFactor;
     }
 
-    void CheckForPush(XRController controller)
+    void OnSelectEntered(SelectEnterEventArgs args)
     {
-        // Проверяем, находится ли контроллер в контакте с шаром
-        if (IsControllerTouchingBall(controller))
+        // Получаем Interactor, который начал взаимодействие
+        IXRInteractor interactor = args.interactorObject;
+
+        Vector3 controllerVelocity = Vector3.zero;
+
+        // Попытка получить скорость из XRBaseControllerInteractor (для реальных контроллеров)
+        if (interactor is XRBaseControllerInteractor controllerInteractor && controllerInteractor.xrController != null)
         {
-            // Получаем текущую скорость контроллера
-            Vector3 controllerVelocity = GetControllerVelocity(controller);
-
-            // Применяем силу к шару в направлении движения контроллера
-            rb.AddForce(controllerVelocity * pushForce, ForceMode.VelocityChange);
-        }
-    }
-
-    bool IsControllerTouchingBall(XRController controller)
-    {
-        // Проверяем столкновение между коллайдером контроллера и коллайдером шара
-        // Вам может потребоваться добавить коллайдеры на модели контроллеров.
-        // Для Action-based XR Rig используйте Interaction Manager и Interactor/Interactable.
-        // Для Device-based/Legacy XR Rig добавьте Rigidbody и Collider на модели контроллеров с Is Trigger = true.
-
-        Collider[] controllerColliders;
-        if (controller.TryGetComponent(out CharacterController characterController))
-        {
-            controllerColliders = new Collider[] { characterController };
-        }
-        else
-        {
-            controllerColliders = controller.GetComponentsInChildren<Collider>();
-        }
-
-        Collider ballCollider = GetComponent<Collider>();
-
-        foreach (var controllerCollider in controllerColliders)
-        {
-            if (controllerCollider.bounds.Intersects(ballCollider.bounds))
+            if (controllerInteractor.xrController is XRController xrController) // Явное приведение к XRController
             {
-                return true;
+                if (xrController.inputDevice.TryGetFeatureValue(UnityEngine.XR.CommonUsages.deviceVelocity, out controllerVelocity))
+                {
+                    // Применяем силу к шару
+                    rb.AddForce(controllerVelocity * pushForce, ForceMode.VelocityChange);
+
+                    // Двигаем игрока в том же направлении
+                    if (playerRb != null)
+                    {
+                        playerRb.AddForce(controllerVelocity * playerMoveForceMultiplier, ForceMode.VelocityChange);
+                    }
+                    else if (args.interactorObject is XRBaseControllerInteractor baseControllerInteractor && baseControllerInteractor.transform.parent != null)
+                    {
+                        // Попытка переместить Transform игрока, если нет Rigidbody (предполагаем, что XR Rig управляется Transform)
+                        Transform playerTransform = baseControllerInteractor.transform.parent.parent; // Зависит от структуры вашего XR Rig
+                        playerTransform.Translate(controllerVelocity * playerMoveForceMultiplier * Time.fixedDeltaTime, Space.World);
+                    }
+                    return; // Выходим, если скорость получена успешно
+                }
+                else
+                {
+                    Debug.LogWarning("Could not get device velocity from real controller: " + controllerInteractor.xrController.name);
+                }
+            }
+            else
+            {
+                Debug.LogWarning("controllerInteractor.xrController is not of type XRController.");
             }
         }
-        return false;
+        // Добавьте здесь логику для XRDeviceSimulator, если вы его используете для получения скорости
+
+        Debug.LogWarning("Could not determine interactor type or get its velocity.");
     }
 
-    Vector3 GetControllerVelocity(XRController controller)
+    void OnSelectExited(SelectExitEventArgs args)
     {
-        // В зависимости от используемого SDK и настроек, получение скорости контроллера может отличаться.
-        // Для OpenXR (Action-based):
-        if (controller.inputDevice.TryGetFeatureValue(UnityEngine.XR.CommonUsages.deviceVelocity, out Vector3 velocity))
-        {
-            return velocity;
-        }
-
-        // Для OpenXR (Device-based) или других SDK может потребоваться другой способ получения скорости.
-        // Например, отслеживание положения в предыдущем кадре и вычисление разницы.
-        // Или использование специфичных API SDK.
-        Debug.LogWarning("Could not get controller velocity for " + controller.name);
-        return Vector3.zero;
+        // Действия при отпускании шара (можно оставить пустым, если не требуется)
     }
 }
